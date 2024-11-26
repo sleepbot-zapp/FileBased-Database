@@ -10,7 +10,7 @@ import typing
 
 class ResponseObject:
     """Defines the structure of a parsed response object with dynamic attributes."""
-    
+
     def __init__(self, **data: typing.Dict[str, typing.Any]):
         """
         Initializes the object with dynamic attributes based on the keys in data.
@@ -51,8 +51,6 @@ class Database:
         self.return_code_message = return_code_message
         self.key = self._load_or_generate_key(self.key_file, 16)
         self.iv = self._load_or_generate_key(self.iv_file, 16)
-        self.load()
-
 
     def _load_or_generate_key(self, file_path, length):
         """Loads a key/IV from a file, or generates and saves a new one."""
@@ -65,7 +63,6 @@ class Database:
                 file.write(key)
             return key
 
-
     def _encrypt(self, plaintext):
         """Encrypts plaintext using AES encryption."""
         backend = default_backend()
@@ -74,7 +71,6 @@ class Database:
         padder = padding.PKCS7(algorithms.AES.block_size).padder()
         padded_data = padder.update(plaintext.encode()) + padder.finalize()
         return encryptor.update(padded_data) + encryptor.finalize()
-
 
     def _decrypt(self, ciphertext):
         """Decrypts ciphertext using AES decryption."""
@@ -86,7 +82,6 @@ class Database:
         unpadded_data = unpadder.update(decrypted_data) + unpadder.finalize()
         return unpadded_data.decode()
 
-
     def _acquire_lock(self):
         """Creates a lock file to prevent simultaneous writes."""
         if os.path.exists(self.lock_file):
@@ -94,12 +89,10 @@ class Database:
         with open(self.lock_file, "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-
     def _release_lock(self):
         """Removes the lock file."""
         if os.path.exists(self.lock_file):
             os.remove(self.lock_file)
-
 
     def load(self):
         """Loads the database from the file."""
@@ -119,98 +112,6 @@ class Database:
         else:
             return self._generate_response(3, "Database file not found.")
 
-
-
-    def commit(self):
-        """
-        Finalizes staged changes, including deletions, and writes them to the database file.
-        """
-        try:
-            self._acquire_lock()
-            for key, value in self.staged_data.items():
-                if value is None:  
-                    self.data.pop(key, None)
-                else:
-                    self.data[key] = value
-            self.staged_data.clear()  
-            with open(self.temp_file, "wb") as temp:
-                encrypted_data = self._encrypt(json.dumps(self.data))
-                temp.write(encrypted_data)
-            shutil.move(self.temp_file, self.db_file)
-            return self._generate_response(1, "Changes committed successfully.")
-        except Exception as e:
-            return self._generate_response(3, f"Error committing changes: {str(e)}")
-        finally:
-            self._release_lock()
-
-
-    def add(self, key, value):
-        """Adds a key-value pair to the staging area."""
-        self.staged_data[key] = value
-        return self._generate_response(1, f"Staged: {key} -> {value}", {key: value})
-
-
-    def update(self, key, value):
-        """Updates a key-value pair in the staging area."""
-        if key in self.data or key in self.staged_data:
-            self.staged_data[key] = value
-            return self._generate_response(1, f"Staged update: {key} -> {value}", {key: value})
-        else:
-            return self._generate_response(2, f"Key '{key}' not found in the database.", None)
-
-
-    def delete(self, key):
-        """
-        Stages the deletion of a key-value pair, including the key itself.
-        The actual removal occurs only after commit is called.
-        """
-        if key in self.data or key in self.staged_data:
-            self.staged_data[key] = None  
-            return self._generate_response(1, f"Staged deletion: {key}")
-        else:
-            return self._generate_response(2, f"Key '{key}' not found in the database.", None)
-
-
-    def drop(self):
-        """
-        Stages the deletion of all keys and their values from the database.
-        The actual removal occurs only after commit is called.
-        """
-        
-        self.staged_data.update({key: None for key in self.data.keys()})
-        return self._generate_response(1, "Staged deletion of all keys.")
-
-
-
-    def search(self, key):
-        """
-        Retrieves a value by key from the committed database only.
-        Staged changes are excluded.
-        """
-        if key in self.data:
-            return self._generate_response(1, "Key found", {key: self.data[key]})
-        else:
-            return self._generate_response(2, f"Key '{key}' not found.", None)
-
-
-    def show_all(self):
-        """
-        Returns all committed key-value pairs from the database.
-        Staged changes are excluded.
-        """
-        return self._generate_response(1, "All committed data retrieved.", self.data)
-    
-
-    def show_staged(self):
-        """
-        Returns all staged key-value pairs that are not yet committed.
-        """
-        if self.staged_data:
-            return self._generate_response(1, "All staged data retrieved.", self.staged_data)
-        else:
-            return self._generate_response(2, "No staged changes.", None)
-
-
     def _generate_response(self, code, message, data=None):
         """Generates the response object, including or excluding the code/message based on the toggle."""
         response_obj = ResponseObject(**(data if isinstance(data, dict) else {}))
@@ -218,3 +119,94 @@ class Database:
             return {"Response Code": code, "Response Message": message, "Response": response_obj}
         else:
             return response_obj
+
+
+class Session:
+    def __init__(self, db: Database, session_type="r"):
+        """
+        Initializes a session for database operations.
+        :param db: The Database object instance
+        :param session_type: Type of session - 'r' for read-only and 'w' for read-write
+        """
+        self.db = db
+        self.session_type = session_type
+        self.staged_data = {}  
+        self.db_loaded = False
+
+    def __enter__(self):
+        """Start the session and load the database if required."""
+        if self.session_type == "w":
+            self.db.load()
+            self.db_loaded = True
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Commit the changes (if in write mode) and clean up the session."""
+        if self.session_type == "w" and self.db_loaded:
+            self.commit()
+
+    def add(self, key, value):
+        """Add a key-value pair to the staging area."""
+        self.staged_data[key] = value
+        return self.db._generate_response(1, f"Staged: {key} -> {value}", {key: value})
+
+    def update(self, key, value):
+        """Update a key-value pair in the staging area."""
+        if key in self.db.data or key in self.staged_data:
+            self.staged_data[key] = value
+            return self.db._generate_response(1, f"Staged update: {key} -> {value}", {key: value})
+        else:
+            return self.db._generate_response(2, f"Key '{key}' not found in the database.", None)
+
+    def delete(self, key):
+        """Stage the deletion of a key-value pair."""
+        if key in self.db.data or key in self.staged_data:
+            self.staged_data[key] = None
+            return self.db._generate_response(1, f"Staged deletion: {key}")
+        else:
+            return self.db._generate_response(2, f"Key '{key}' not found in the database.", None)
+
+    def drop(self):
+        """Stage the deletion of all keys and values."""
+        self.staged_data.update({key: None for key in self.db.data.keys()})
+        return self.db._generate_response(1, "Staged deletion of all keys.")
+
+    def search(self, key):
+        """Search for a key in the committed data (excluding staged changes)."""
+        if key in self.db.data:
+            return self.db._generate_response(1, "Key found", {key: self.db.data[key]})
+        else:
+            return self.db._generate_response(2, f"Key '{key}' not found.", None)
+
+    def show_all(self):
+        """Return all committed key-value pairs."""
+        return self.db._generate_response(1, "All committed data retrieved.", self.db.data)
+
+    def show_staged(self):
+        """Return all staged key-value pairs."""
+        if self.staged_data:
+            return self.db._generate_response(1, "All staged data retrieved.", self.staged_data)
+        else:
+            return self.db._generate_response(2, "No staged changes.", None)
+
+    def commit(self):
+        """Commit staged changes to the database."""
+        try:
+            self.db._acquire_lock()
+            for key, value in self.staged_data.items():
+                if value is None:  
+                    self.db.data.pop(key, None)
+                else:  
+                    self.db.data[key] = value
+            self.staged_data.clear()
+
+            with open(self.db.temp_file, "wb") as temp:
+                encrypted_data = self.db._encrypt(json.dumps(self.db.data))
+                temp.write(encrypted_data)
+            shutil.move(self.db.temp_file, self.db.db_file)
+            return self.db._generate_response(1, "Changes committed successfully.")
+        except Exception as e:
+            return self.db._generate_response(3, f"Error committing changes: {str(e)}")
+        finally:
+            self.db._release_lock()
+            
